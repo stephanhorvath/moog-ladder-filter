@@ -4,6 +4,9 @@ use std::sync::Arc;
 
 struct MoogLadderFilter {
     params: Arc<FilterParams>,
+    prev_outputs: Vec<f32>,
+    prev_w: Vec<f32>,
+    g: f32,
 }
 
 #[derive(Params)]
@@ -32,6 +35,9 @@ impl Default for MoogLadderFilter {
     fn default() -> Self {
         Self {
             params: Arc::new(FilterParams::default()),
+            prev_outputs: vec![0.0, 0.0, 0.0, 0.0],
+            prev_w: vec![0.0, 0.0, 0.0],
+            g: 0.0,
         }
     }
 }
@@ -43,7 +49,7 @@ impl Default for FilterParams {
                 "Cutoff",
                 20_000.0,
                 FloatRange::Linear {
-                    min: 0.0,
+                    min: 2.0,
                     max: 20_000.0,
                 },
             )
@@ -67,17 +73,10 @@ impl Default for FilterParams {
             .with_value_to_string(formatters::v2s_f32_percentage(2))
             .with_string_to_value(formatters::s2v_f32_percentage()),
 
-            output: FloatParam::new(
-                "Output",
-                0.0,
-                FloatRange::Linear {
-                    min: 0.0,
-                    max: 10.0,
-                },
-            )
-            .with_smoother(SmoothingStyle::Linear(50.0))
-            .with_value_to_string(formatters::v2s_f32_percentage(2))
-            .with_string_to_value(formatters::s2v_f32_percentage()),
+            output: FloatParam::new("Output", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_smoother(SmoothingStyle::Linear(50.0))
+                .with_value_to_string(formatters::v2s_f32_percentage(2))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
 
             attack: FloatParam::new(
                 "Attack",
@@ -157,17 +156,61 @@ impl Plugin for MoogLadderFilter {
         self.params.clone()
     }
 
+    fn initialize(
+        &mut self,
+        _audio_io_layout: &AudioIOLayout,
+        buffer_config: &BufferConfig,
+        _context: &mut impl InitContext<Self>,
+    ) -> bool {
+        self.g = 1.0
+            - (-std::f32::consts::TAU * (self.params.cutoff.smoothed.next())
+                / buffer_config.sample_rate as f32)
+                .exp();
+        true
+    }
+
     fn process(
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        self.g = 1.0
+            - (-std::f32::consts::TAU * (self.params.cutoff.smoothed.next())
+                / _context.transport().sample_rate as f32)
+                .exp();
+        let two_vt_g = 2.0 * 0.026 * self.g as f32;
         for channel_samples in buffer.iter_samples() {
-            let output = self.params.cutoff.smoothed.next();
-
             for sample in channel_samples {
-                *sample *= output;
+                let input = *sample;
+                let tanh_stage_1 = (&input
+                    - 4.0 * (self.params.resonance.smoothed.next() * self.prev_outputs[3]) / 2.0
+                        * 0.026)
+                    .tanh();
+                let stage_1 = self.prev_outputs[0] + two_vt_g * (tanh_stage_1 - self.prev_w[0]);
+                self.prev_outputs[0] = stage_1;
+
+                let w_a = (stage_1 / (2.0 * 0.026)).tanh();
+
+                let stage_2 = self.prev_outputs[1] + two_vt_g * (w_a - self.prev_w[1]);
+                self.prev_outputs[1] = stage_2;
+
+                let w_b = (stage_2 / (2.0 * 0.026)).tanh();
+
+                let stage_3 = self.prev_outputs[2] + two_vt_g * (w_b - self.prev_w[2]);
+                self.prev_outputs[2] = stage_3;
+
+                let w_c = (stage_3 / (2.0 * 0.026)).tanh();
+
+                let stage_4 = self.prev_outputs[3]
+                    + two_vt_g * (w_c - (self.prev_outputs[3] / (2.0 * 0.026)).tanh());
+                self.prev_outputs[3] = stage_4;
+
+                self.prev_w[0] = w_a;
+                self.prev_w[1] = w_b;
+                self.prev_w[2] = w_c;
+
+                *sample = stage_4;
             }
         }
 

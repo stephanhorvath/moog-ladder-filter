@@ -184,6 +184,7 @@ impl Plugin for MoogLadderFilter {
     ) -> ProcessStatus {
         for channel_samples in buffer.iter_samples() {
             let cutoff = self.params.cutoff.smoothed.next();
+            let drive = self.params.drive.smoothed.next();
             let resonance = self.params.resonance.smoothed.next();
             let output = self.params.output.smoothed.next();
 
@@ -197,26 +198,28 @@ impl Plugin for MoogLadderFilter {
 
             for sample in channel_samples {
                 let input = *sample;
-                let tanh_stage_1 =
-                    (input - ((4.0 * resonance * self.prev_outputs[3]) * two_vt_reciprocal)).tanh();
+                let tanh_stage_1 = (input
+                    - ((4.0 * resonance * self.prev_outputs[3]) * two_vt_reciprocal) * drive)
+                    .tanh();
                 let stage_1 = self.prev_outputs[0] + two_vt_g * (tanh_stage_1 - self.prev_w[0]);
                 self.prev_outputs[0] = stage_1;
 
-                self.prev_w[0] = (stage_1 * two_vt_reciprocal).tanh();
+                self.prev_w[0] = (stage_1 * two_vt_reciprocal * drive).tanh();
 
                 let stage_2 = self.prev_outputs[1] + two_vt_g * (self.prev_w[0] - self.prev_w[1]);
                 self.prev_outputs[1] = stage_2;
 
-                self.prev_w[1] = (stage_2 * two_vt_reciprocal).tanh();
+                self.prev_w[1] = (stage_2 * two_vt_reciprocal * drive).tanh();
 
                 let stage_3 = self.prev_outputs[2] + two_vt_g * (self.prev_w[1] - self.prev_w[2]);
                 self.prev_outputs[2] = stage_3;
 
-                self.prev_w[2] = (stage_3 * two_vt_reciprocal).tanh();
+                self.prev_w[2] = (stage_3 * two_vt_reciprocal * drive).tanh();
 
                 let stage_4 = self.prev_outputs[3]
                     + two_vt_g
-                        * (self.prev_w[2] - (self.prev_outputs[3] * two_vt_reciprocal).tanh());
+                        * (self.prev_w[2]
+                            - (self.prev_outputs[3] * two_vt_reciprocal * drive).tanh());
 
                 *sample = output * stage_4;
                 self.prev_outputs[3] = stage_4;

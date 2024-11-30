@@ -48,18 +48,18 @@ impl Default for FilterParams {
             cutoff: FloatParam::new(
                 "Cutoff",
                 20_000.0,
-                FloatRange::Linear {
-                    min: 2.0,
+                FloatRange::Skewed {
+                    min: 20.0,
                     max: 20_000.0,
+                    factor: 0.5,
                 },
             )
-            .with_smoother(SmoothingStyle::Linear(50.0))
-            .with_unit(" Hz")
+            .with_smoother(SmoothingStyle::Exponential(1.0))
             .with_value_to_string(formatters::v2s_f32_hz_then_khz(2))
             .with_string_to_value(formatters::s2v_f32_hz_then_khz()),
 
-            resonance: FloatParam::new("Resonance", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_smoother(SmoothingStyle::Linear(50.0)),
+            resonance: FloatParam::new("Resonance", 0.0, FloatRange::Linear { min: 0.0, max: 4.0 })
+                .with_smoother(SmoothingStyle::Linear(10.0)),
 
             drive: FloatParam::new(
                 "Drive",
@@ -69,14 +69,21 @@ impl Default for FilterParams {
                     max: 10.0,
                 },
             )
-            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_smoother(SmoothingStyle::Linear(10.0))
             .with_value_to_string(formatters::v2s_f32_percentage(2))
             .with_string_to_value(formatters::s2v_f32_percentage()),
 
-            output: FloatParam::new("Output", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
-                .with_smoother(SmoothingStyle::Linear(50.0))
-                .with_value_to_string(formatters::v2s_f32_percentage(2))
-                .with_string_to_value(formatters::s2v_f32_percentage()),
+            output: FloatParam::new(
+                "Output",
+                1.0,
+                FloatRange::Linear {
+                    min: -10.0,
+                    max: 10.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_value_to_string(formatters::v2s_f32_percentage(2))
+            .with_string_to_value(formatters::s2v_f32_percentage()),
 
             attack: FloatParam::new(
                 "Attack",
@@ -86,7 +93,7 @@ impl Default for FilterParams {
                     max: 10.0,
                 },
             )
-            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_smoother(SmoothingStyle::Linear(10.0))
             .with_value_to_string(formatters::v2s_f32_percentage(2))
             .with_string_to_value(formatters::s2v_f32_percentage()),
 
@@ -98,7 +105,7 @@ impl Default for FilterParams {
                     max: 10.0,
                 },
             )
-            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_smoother(SmoothingStyle::Linear(10.0))
             .with_value_to_string(formatters::v2s_f32_percentage(2))
             .with_string_to_value(formatters::s2v_f32_percentage()),
 
@@ -110,7 +117,7 @@ impl Default for FilterParams {
                     max: 10.0,
                 },
             )
-            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_smoother(SmoothingStyle::Linear(10.0))
             .with_value_to_string(formatters::v2s_f32_percentage(2))
             .with_string_to_value(formatters::s2v_f32_percentage()),
 
@@ -175,42 +182,44 @@ impl Plugin for MoogLadderFilter {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        self.g = 1.0
-            - (-std::f32::consts::TAU * (self.params.cutoff.smoothed.next())
-                / _context.transport().sample_rate as f32)
-                .exp();
-        let two_vt_g = 2.0 * 0.026 * self.g as f32;
         for channel_samples in buffer.iter_samples() {
+            let cutoff = self.params.cutoff.smoothed.next();
+            let resonance = self.params.resonance.smoothed.next();
+            let output = self.params.output.smoothed.next();
+
+            let sample_rate = _context.transport().sample_rate;
+            let inverse_sample_rate = 1.0 / sample_rate;
+
+            self.g = 1.0 - (-std::f32::consts::TAU * (cutoff * inverse_sample_rate)).exp();
+            let two_vt = 2.0 * 0.026;
+            let two_vt_reciprocal = 1.0 / two_vt;
+            let two_vt_g = two_vt * self.g as f32;
+
             for sample in channel_samples {
                 let input = *sample;
-                let tanh_stage_1 = (&input
-                    - 4.0 * (self.params.resonance.smoothed.next() * self.prev_outputs[3]) / 2.0
-                        * 0.026)
-                    .tanh();
+                let tanh_stage_1 =
+                    (input - ((4.0 * resonance * self.prev_outputs[3]) * two_vt_reciprocal)).tanh();
                 let stage_1 = self.prev_outputs[0] + two_vt_g * (tanh_stage_1 - self.prev_w[0]);
                 self.prev_outputs[0] = stage_1;
 
-                let w_a = (stage_1 / (2.0 * 0.026)).tanh();
+                self.prev_w[0] = (stage_1 * two_vt_reciprocal).tanh();
 
-                let stage_2 = self.prev_outputs[1] + two_vt_g * (w_a - self.prev_w[1]);
+                let stage_2 = self.prev_outputs[1] + two_vt_g * (self.prev_w[0] - self.prev_w[1]);
                 self.prev_outputs[1] = stage_2;
 
-                let w_b = (stage_2 / (2.0 * 0.026)).tanh();
+                self.prev_w[1] = (stage_2 * two_vt_reciprocal).tanh();
 
-                let stage_3 = self.prev_outputs[2] + two_vt_g * (w_b - self.prev_w[2]);
+                let stage_3 = self.prev_outputs[2] + two_vt_g * (self.prev_w[1] - self.prev_w[2]);
                 self.prev_outputs[2] = stage_3;
 
-                let w_c = (stage_3 / (2.0 * 0.026)).tanh();
+                self.prev_w[2] = (stage_3 * two_vt_reciprocal).tanh();
 
                 let stage_4 = self.prev_outputs[3]
-                    + two_vt_g * (w_c - (self.prev_outputs[3] / (2.0 * 0.026)).tanh());
+                    + two_vt_g
+                        * (self.prev_w[2] - (self.prev_outputs[3] * two_vt_reciprocal).tanh());
+
+                *sample = output * stage_4;
                 self.prev_outputs[3] = stage_4;
-
-                self.prev_w[0] = w_a;
-                self.prev_w[1] = w_b;
-                self.prev_w[2] = w_c;
-
-                *sample = stage_4;
             }
         }
 

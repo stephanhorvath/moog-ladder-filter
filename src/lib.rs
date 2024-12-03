@@ -61,17 +61,10 @@ impl Default for FilterParams {
             resonance: FloatParam::new("Resonance", 0.0, FloatRange::Linear { min: 0.0, max: 4.0 })
                 .with_smoother(SmoothingStyle::Linear(10.0)),
 
-            drive: FloatParam::new(
-                "Drive",
-                0.0,
-                FloatRange::Linear {
-                    min: 0.0,
-                    max: 10.0,
-                },
-            )
-            .with_smoother(SmoothingStyle::Linear(10.0))
-            .with_value_to_string(formatters::v2s_f32_percentage(2))
-            .with_string_to_value(formatters::s2v_f32_percentage()),
+            drive: FloatParam::new("Drive", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_smoother(SmoothingStyle::Linear(10.0))
+                .with_value_to_string(formatters::v2s_f32_percentage(2))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
 
             output: FloatParam::new(
                 "Output",
@@ -183,6 +176,7 @@ impl Plugin for MoogLadderFilter {
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         for channel_samples in buffer.iter_samples() {
+            let poles = self.params.two_pole_four_pole.value();
             let cutoff = self.params.cutoff.smoothed.next();
             let drive = self.params.drive.smoothed.next();
             let resonance = self.params.resonance.smoothed.next();
@@ -198,31 +192,50 @@ impl Plugin for MoogLadderFilter {
 
             for sample in channel_samples {
                 let input = *sample;
-                let tanh_stage_1 = (input
-                    - ((4.0 * resonance * self.prev_outputs[3]) * two_vt_reciprocal) * drive)
-                    .tanh();
-                let stage_1 = self.prev_outputs[0] + two_vt_g * (tanh_stage_1 - self.prev_w[0]);
-                self.prev_outputs[0] = stage_1;
+                if poles {
+                    let tanh_stage_1 = (input
+                        - ((4.0 * resonance * self.prev_outputs[3]) * two_vt_reciprocal) * drive)
+                        .tanh();
+                    let stage_1 = self.prev_outputs[0] + two_vt_g * (tanh_stage_1 - self.prev_w[0]);
+                    self.prev_outputs[0] = stage_1;
 
-                self.prev_w[0] = (stage_1 * two_vt_reciprocal * drive).tanh();
+                    self.prev_w[0] = (stage_1 * two_vt_reciprocal * drive).tanh();
 
-                let stage_2 = self.prev_outputs[1] + two_vt_g * (self.prev_w[0] - self.prev_w[1]);
-                self.prev_outputs[1] = stage_2;
+                    let stage_2 =
+                        self.prev_outputs[1] + two_vt_g * (self.prev_w[0] - self.prev_w[1]);
+                    self.prev_outputs[1] = stage_2;
 
-                self.prev_w[1] = (stage_2 * two_vt_reciprocal * drive).tanh();
+                    self.prev_w[1] = (stage_2 * two_vt_reciprocal * drive).tanh();
 
-                let stage_3 = self.prev_outputs[2] + two_vt_g * (self.prev_w[1] - self.prev_w[2]);
-                self.prev_outputs[2] = stage_3;
+                    let stage_3 =
+                        self.prev_outputs[2] + two_vt_g * (self.prev_w[1] - self.prev_w[2]);
+                    self.prev_outputs[2] = stage_3;
 
-                self.prev_w[2] = (stage_3 * two_vt_reciprocal * drive).tanh();
+                    self.prev_w[2] = (stage_3 * two_vt_reciprocal * drive).tanh();
 
-                let stage_4 = self.prev_outputs[3]
-                    + two_vt_g
-                        * (self.prev_w[2]
-                            - (self.prev_outputs[3] * two_vt_reciprocal * drive).tanh());
+                    let stage_4 = self.prev_outputs[3]
+                        + two_vt_g
+                            * (self.prev_w[2]
+                                - (self.prev_outputs[3] * two_vt_reciprocal * drive).tanh());
 
-                *sample = output * stage_4;
-                self.prev_outputs[3] = stage_4;
+                    *sample = output * stage_4;
+                    self.prev_outputs[3] = stage_4;
+                } else {
+                    let tanh_stage_1 = (input
+                        - ((4.0 * resonance * self.prev_outputs[1]) * two_vt_reciprocal) * drive)
+                        .tanh();
+                    let stage_1 = self.prev_outputs[0] + two_vt_g * (tanh_stage_1 - self.prev_w[0]);
+                    self.prev_outputs[0] = stage_1;
+                    self.prev_w[0] = (stage_1 * two_vt_reciprocal * drive).tanh();
+
+                    let stage_2 = self.prev_outputs[1]
+                        + two_vt_g
+                            * (self.prev_w[0]
+                                - (self.prev_outputs[1] * two_vt_reciprocal * drive).tanh());
+
+                    *sample = output * stage_2;
+                    self.prev_outputs[1] = stage_2;
+                }
             }
         }
 

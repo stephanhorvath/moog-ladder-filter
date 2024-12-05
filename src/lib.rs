@@ -51,14 +51,14 @@ impl Default for FilterParams {
                 FloatRange::Skewed {
                     min: 20.0,
                     max: 20_000.0,
-                    factor: 0.5,
+                    factor: 0.25,
                 },
             )
             .with_smoother(SmoothingStyle::Exponential(1.0))
             .with_value_to_string(formatters::v2s_f32_hz_then_khz(2))
             .with_string_to_value(formatters::s2v_f32_hz_then_khz()),
 
-            resonance: FloatParam::new("Resonance", 0.0, FloatRange::Linear { min: 0.0, max: 4.0 })
+            resonance: FloatParam::new("Resonance", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_smoother(SmoothingStyle::Linear(10.0)),
 
             drive: FloatParam::new("Drive", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
@@ -66,17 +66,10 @@ impl Default for FilterParams {
                 .with_value_to_string(formatters::v2s_f32_percentage(2))
                 .with_string_to_value(formatters::s2v_f32_percentage()),
 
-            output: FloatParam::new(
-                "Output",
-                1.0,
-                FloatRange::Linear {
-                    min: -10.0,
-                    max: 10.0,
-                },
-            )
-            .with_smoother(SmoothingStyle::Linear(10.0))
-            .with_value_to_string(formatters::v2s_f32_percentage(2))
-            .with_string_to_value(formatters::s2v_f32_percentage()),
+            output: FloatParam::new("Output", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_smoother(SmoothingStyle::Linear(10.0))
+                .with_value_to_string(formatters::v2s_f32_percentage(2))
+                .with_string_to_value(formatters::s2v_f32_percentage()),
 
             attack: FloatParam::new(
                 "Attack",
@@ -176,64 +169,67 @@ impl Plugin for MoogLadderFilter {
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         for channel_samples in buffer.iter_samples() {
+            // smoothed plugin params - call only once per loop
             let poles = self.params.two_pole_four_pole.value();
             let cutoff = self.params.cutoff.smoothed.next();
-            let drive = self.params.drive.smoothed.next();
-            let resonance = self.params.resonance.smoothed.next();
-            let output = self.params.output.smoothed.next();
+            let drive = 1.0 + self.params.drive.smoothed.next() * 14.0;
+            let resonance = self.params.resonance.smoothed.next() * 4.0;
+            let output = 1.0 + self.params.output.smoothed.next() * 14.0;
 
             let sample_rate = _context.transport().sample_rate;
             let inverse_sample_rate = 1.0 / sample_rate;
 
+            // these values are extracted from the analog circuit
+            // but I imagine something like 0.026 is so small that it can maybe be ignored
             self.g = 1.0 - (-std::f32::consts::TAU * (cutoff * inverse_sample_rate)).exp();
             let two_vt = 2.0 * 0.026;
             let two_vt_reciprocal = 1.0 / two_vt;
             let two_vt_g = two_vt * self.g as f32;
 
             for sample in channel_samples {
-                let input = *sample;
+                // let input = *sample;
+                let input = (*sample * drive).tanh();
+                // true = 4 pole / false = 2 pole
                 if poles {
                     let tanh_stage_1 = (input
-                        - ((4.0 * resonance * self.prev_outputs[3]) * two_vt_reciprocal) * drive)
+                        - ((4.0 * resonance * self.prev_outputs[3]) * two_vt_reciprocal))
                         .tanh();
                     let stage_1 = self.prev_outputs[0] + two_vt_g * (tanh_stage_1 - self.prev_w[0]);
                     self.prev_outputs[0] = stage_1;
 
-                    self.prev_w[0] = (stage_1 * two_vt_reciprocal * drive).tanh();
+                    self.prev_w[0] = (stage_1 * two_vt_reciprocal).tanh();
 
                     let stage_2 =
                         self.prev_outputs[1] + two_vt_g * (self.prev_w[0] - self.prev_w[1]);
                     self.prev_outputs[1] = stage_2;
 
-                    self.prev_w[1] = (stage_2 * two_vt_reciprocal * drive).tanh();
+                    self.prev_w[1] = (stage_2 * two_vt_reciprocal).tanh();
 
                     let stage_3 =
                         self.prev_outputs[2] + two_vt_g * (self.prev_w[1] - self.prev_w[2]);
                     self.prev_outputs[2] = stage_3;
 
-                    self.prev_w[2] = (stage_3 * two_vt_reciprocal * drive).tanh();
+                    self.prev_w[2] = (stage_3 * two_vt_reciprocal).tanh();
 
                     let stage_4 = self.prev_outputs[3]
                         + two_vt_g
-                            * (self.prev_w[2]
-                                - (self.prev_outputs[3] * two_vt_reciprocal * drive).tanh());
+                            * (self.prev_w[2] - (self.prev_outputs[3] * two_vt_reciprocal).tanh());
 
-                    *sample = output * stage_4;
+                    *sample = (output * stage_4 * drive).tanh();
                     self.prev_outputs[3] = stage_4;
                 } else {
                     let tanh_stage_1 = (input
-                        - ((4.0 * resonance * self.prev_outputs[1]) * two_vt_reciprocal) * drive)
+                        - ((4.0 * resonance * self.prev_outputs[1]) * two_vt_reciprocal))
                         .tanh();
                     let stage_1 = self.prev_outputs[0] + two_vt_g * (tanh_stage_1 - self.prev_w[0]);
                     self.prev_outputs[0] = stage_1;
-                    self.prev_w[0] = (stage_1 * two_vt_reciprocal * drive).tanh();
+                    self.prev_w[0] = (stage_1 * two_vt_reciprocal).tanh();
 
                     let stage_2 = self.prev_outputs[1]
                         + two_vt_g
-                            * (self.prev_w[0]
-                                - (self.prev_outputs[1] * two_vt_reciprocal * drive).tanh());
+                            * (self.prev_w[0] - (self.prev_outputs[1] * two_vt_reciprocal).tanh());
 
-                    *sample = output * stage_2;
+                    *sample = (output * stage_2).tanh();
                     self.prev_outputs[1] = stage_2;
                 }
             }
